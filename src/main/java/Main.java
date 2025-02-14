@@ -1,5 +1,6 @@
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.neovisionaries.i18n.CountryCode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -16,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
@@ -25,13 +27,18 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import se.michaelthelin.spotify.SpotifyApi;
 import se.michaelthelin.spotify.SpotifyHttpManager;
+import se.michaelthelin.spotify.enums.ModelObjectType;
 import se.michaelthelin.spotify.exceptions.SpotifyWebApiException;
 import se.michaelthelin.spotify.model_objects.credentials.AuthorizationCodeCredentials;
+import se.michaelthelin.spotify.model_objects.specification.AlbumSimplified;
+import se.michaelthelin.spotify.model_objects.specification.ArtistSimplified;
 import se.michaelthelin.spotify.model_objects.specification.Paging;
+import se.michaelthelin.spotify.model_objects.specification.PagingCursorbased;
 import se.michaelthelin.spotify.model_objects.specification.PlaylistSimplified;
 import se.michaelthelin.spotify.model_objects.specification.PlaylistTrack;
 import se.michaelthelin.spotify.model_objects.specification.SavedTrack;
 import se.michaelthelin.spotify.model_objects.specification.Track;
+import se.michaelthelin.spotify.model_objects.specification.TrackSimplified;
 import se.michaelthelin.spotify.requests.data.library.GetUsersSavedTracksRequest;
 import se.michaelthelin.spotify.requests.data.tracks.GetTrackRequest;
 
@@ -39,7 +46,7 @@ public class Main {
 
   private static final Dotenv dotenv = Dotenv.load();
   private static final URI redirectUri = SpotifyHttpManager.makeUri(
-      "http://localhost:8080/callback");
+      "http://127.0.0.1:8080/callback");
   private static final String tokenFile = "spotify_tokens.json"; // File to store tokens
   private static SpotifyApi spotifyApi;
   private static HttpServer server;
@@ -63,10 +70,12 @@ public class Main {
       refreshAccessToken();
     }
 
-    addPlaylistToShuffleList(listPlaylists());
-    deDupeAndShuffleThePlaylist();
+    getArtistTopTracks("abc");
+//    listArtists();
+//    addPlaylistToShuffleList(listPlaylists());
+//    deDupeAndShuffleThePlaylist();
 
-    updatePlaylistImage();
+//    updatePlaylistImage();
 
   }
 
@@ -75,7 +84,8 @@ public class Main {
 
     // Step 1: Generate Authorization URI
     String authorizationUri = spotifyApi.authorizationCodeUri().scope(
-            "playlist-read-private user-library-read playlist-modify-private ugc-image-upload playlist-read-collaborative") // Add required scopes
+            "playlist-read-private user-library-read playlist-modify-private "
+                + "ugc-image-upload playlist-read-collaborative user-follow-read") // Add required scopes
         .build().execute().toString();
 
     System.out.println("Open the following URI in your browser:");
@@ -190,7 +200,7 @@ public class Main {
 
   public static List<Playlist> listPlaylists() {
     try {
-      List<Playlist> playlistData = JsonFileDb.load();
+      List<Playlist> playlistData = JsonFileDb.loadPlaylists();
       Paging<PlaylistSimplified> playlistsPaging = spotifyApi.getListOfCurrentUsersPlaylists() // Fetch playlists
           .build().execute();
 
@@ -220,9 +230,9 @@ public class Main {
       }
 
       // Save updated playlist data to file
-      JsonFileDb.save(playlistData);
+      JsonFileDb.savePlaylists(playlistData);
       System.out.println("Playlists have been saved!");
-      return JsonFileDb.load();
+      return JsonFileDb.loadPlaylists();
 
     } catch (Exception e) {
       e.printStackTrace();
@@ -444,6 +454,113 @@ public class Main {
       songs.forEach(Main::getTrackInfo);
     } catch (Exception e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  private static void listArtists() {
+    try {
+      List<Artist> artistData = JsonFileDb.loadArtists();
+      PagingCursorbased<se.michaelthelin.spotify.model_objects.specification.Artist> artistPaging =
+          spotifyApi.getUsersFollowedArtists(ModelObjectType.ARTIST).build().execute();
+
+
+      Scanner scanner = new Scanner(System.in);
+
+      for (se.michaelthelin.spotify.model_objects.specification.Artist followedArtist : artistPaging.getItems()) {
+        Artist artist = new Artist();
+        artist.setName(followedArtist.getName());
+        artist.setId(followedArtist.getId());
+
+        if (artistData.contains(artist) || artist.getId().equals(SHUFFLE_ID)) {
+          continue;
+        }
+
+        // Prompt the user for "keep" input
+        System.out.printf("Artist: %s ", artist.getName());
+        // Prompt the user for "add to shuffle" input
+        System.out.print("Add this artist to shuffle? (y/n): ");
+        String shuffleResponse = scanner.nextLine().trim().toLowerCase();
+        artist.setIncludeInShuffle(shuffleResponse.equals("y"));
+
+        // Add to artist data
+        artistData.add(artist);
+
+        System.out.println("-----------------------------"); // Just for readability
+      }
+
+      // Save updated playlist data to file
+      JsonFileDb.saveArtists(artistData);
+      System.out.println("Artists have been saved!");
+
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+  }
+
+  private static void getArtistTopTracks(String artistId) {
+    try {
+      artistId = "3p3jPcp8b7WL9XYj4xlsWj";
+//      Track[] topTracks = spotifyApi.getArtistsTopTracks(artistId, CountryCode.US).build()
+//          .execute();
+//      Arrays.stream(topTracks).forEach(track -> System.out.println(track.getName()));
+
+
+      int limit = 50;
+      int offset = 0;
+      List<String> trackIds = new ArrayList<>();
+      List<Track> allTracks = new ArrayList<>();
+
+// Step 1: Get all albums by the artist
+      List<AlbumSimplified> albums = new ArrayList<>();
+      Paging<AlbumSimplified> albumPaging;
+
+      do {
+        albumPaging = spotifyApi.getArtistsAlbums(artistId)
+            .setQueryParameter("include_groups", "album")
+            .limit(limit)
+            .offset(offset)
+            .build()
+            .execute();
+
+        albums.addAll(Arrays.asList(albumPaging.getItems()));
+        offset += limit;
+      } while (albumPaging.getNext() != null);
+
+// Step 2: Collect all track IDs from albums
+      for (AlbumSimplified album : albums) {
+        System.out.println(album.getName());
+        Paging<TrackSimplified> trackPaging = spotifyApi.getAlbumsTracks(album.getId())
+            .limit(50)  // Max per request
+            .build()
+            .execute();
+
+        for (TrackSimplified track : trackPaging.getItems()) {
+          trackIds.add(track.getId());
+        }
+      }
+
+// Step 3: Fetch track details in batches of 50
+      for (int i = 0; i < trackIds.size(); i += 50) {
+        int end = Math.min(i + 50, trackIds.size());
+        String[] batchIds = trackIds.subList(i, end).toArray(new String[0]);
+
+        Track[] tracks = spotifyApi.getSeveralTracks(batchIds).build().execute();
+        allTracks.addAll(Arrays.asList(tracks));
+      }
+
+// Step 4: Sort tracks by popularity (descending order)
+      allTracks.sort((t1, t2) -> Integer.compare(t2.getPopularity(), t1.getPopularity()));
+
+// Step 5: Get top 25 tracks
+      int topN = 25;
+      List<Track> topTracks = allTracks.subList(0, Math.min(topN, allTracks.size()));
+
+      for (Track track : topTracks) {
+        System.out.println(track.getName() + " (Popularity: " + track.getPopularity() + ")");
+      }
+
+    } catch (Exception e) {
+      e.printStackTrace();
     }
   }
 

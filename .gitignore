@@ -5,6 +5,7 @@ build/
 !**/src/test/**/build/
 
 .env
+spotify_tokens.json
 
 ### IntelliJ IDEA ###
 .idea/
