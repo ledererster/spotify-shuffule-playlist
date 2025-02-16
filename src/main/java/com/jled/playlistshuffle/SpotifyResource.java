@@ -1,3 +1,5 @@
+package com.jled.playlistshuffle;
+
 import java.util.Objects;
 
 public abstract class SpotifyResource {

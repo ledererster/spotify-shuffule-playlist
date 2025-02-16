@@ -1,3 +1,5 @@
+package com.jled.playlistshuffle;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
