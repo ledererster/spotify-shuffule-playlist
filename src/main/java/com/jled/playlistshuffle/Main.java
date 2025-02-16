@@ -1,5 +1,6 @@
 package com.jled.playlistshuffle;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -8,6 +9,7 @@ import io.github.cdimascio.dotenv.Dotenv;
 import java.io.BufferedWriter;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -21,7 +23,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Objects;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -59,14 +60,9 @@ public class Main {
 
   private static final Set<String> shufflePlaylistTrackUris = new HashSet<>();
 
-  private static final String SCOPES = String.join(" ",
-      "playlist-read-private",
-      "user-library-read",
-      "playlist-modify-private",
-      "ugc-image-upload",
-      "playlist-read-collaborative",
-      "user-follow-read"
-  );
+  private static final String SCOPES = String.join(" ", "playlist-read-private",
+      "user-library-read", "playlist-modify-private", "ugc-image-upload",
+      "playlist-read-collaborative", "user-follow-read");
 
   public static void main(String[] args) throws Exception {
     spotifyApi = new SpotifyApi.Builder().setClientId(dotenv.get("SPOTIFY_CLIENT"))
@@ -81,12 +77,20 @@ public class Main {
       refreshAccessToken();
     }
 
+    LOG.info("Loading initial playlist state");
     shufflePlaylistTrackUris.addAll(getPlaylistTrackUris(SHUFFLE_ID));
+    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
 
     addPlaylistsToShuffleList();
     addFollowedArtistsToShuffleList();
     shuffleThePlaylist();
     updatePlaylistImage();
+
+    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
+    LOG.info("getting playlist again to verify count..");
+    shufflePlaylistTrackUris.clear();
+    shufflePlaylistTrackUris.addAll(getPlaylistTrackUris(SHUFFLE_ID));
+    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
 
   }
 
@@ -94,8 +98,9 @@ public class Main {
     LOG.info("Starting authorization process...");
 
     // Step 1: Generate Authorization URI
-    String authorizationUri = executeWithRetry(spotifyApi.authorizationCodeUri().scope(SCOPES) // Add required scopes
-        .build()).toString();
+    String authorizationUri = executeWithRetry(
+        spotifyApi.authorizationCodeUri().scope(SCOPES) // Add required scopes
+            .build()).toString();
 
     LOG.info("Open the following URI in your browser:");
     LOG.info(authorizationUri);
@@ -155,7 +160,7 @@ public class Main {
 
   private static boolean loadTokensFromDisk() throws IOException {
     Path tokenPath = Paths.get(TOKEN_FILE);
-    if (!Files.exists(tokenPath)){
+    if (!Files.exists(tokenPath)) {
       return false;
     }
 
@@ -262,8 +267,6 @@ public class Main {
 
   public static void addPlaylistsToShuffleList() throws Exception {
     List<Playlist> playlistsToAdd = listPlaylists();
-    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
-
     // Step 2: Load tracks (URIs) from playlists to be added
     for (Playlist playlist : playlistsToAdd) {
       if (!playlist.isIncludeInShuffle()) {
@@ -298,21 +301,16 @@ public class Main {
   private static void addTracksInChunks(List<String> tracksToAdd) throws Exception {
     int totalTracks = tracksToAdd.size();
     int batches = (int) Math.ceil((double) totalTracks / MAX_TRACKS_PER_REQUEST);
+    Gson gson = new Gson();
     LOG.info("Adding {} tracks in {} batch(es)...", totalTracks, batches);
 
     for (int i = 0; i < totalTracks; i += MAX_TRACKS_PER_REQUEST) {
       List<String> batch = tracksToAdd.subList(i,
           Math.min(i + MAX_TRACKS_PER_REQUEST, totalTracks));
 
-      try {
         executeWithRetry(
-            spotifyApi.addItemsToPlaylist(SHUFFLE_ID, batch.toArray(new String[0])).build());
+            spotifyApi.addItemsToPlaylist(SHUFFLE_ID, gson.toJsonTree(batch).getAsJsonArray()).build());
         LOG.info("Added batch of {} tracks.", batch.size());
-      } catch (TooManyRequestsException e) { // Catch specific rate limit exception
-        int retryAfter = e.getRetryAfter(); // Extract retry-after seconds
-        LOG.warn("Rate limit hit. Retrying after {} seconds...", retryAfter);
-        Thread.sleep(retryAfter * 1000L); // Convert to milliseconds
-      }
     }
     LOG.info("All tracks added successfully.");
   }
@@ -332,8 +330,7 @@ public class Main {
         try {
           Paging<PlaylistTrack> playlistTracks = executeWithRetry(
               spotifyApi.getPlaylistsItems(playlistId).offset(finalOffset).limit(limit).build());
-          return Arrays.stream(playlistTracks.getItems())
-              .map(track -> track.getTrack().getUri())
+          return Arrays.stream(playlistTracks.getItems()).map(track -> track.getTrack().getUri())
               .toList();
         } catch (Exception e) {
           LOG.error("Error fetching tracks: {}", e.getMessage());
@@ -343,10 +340,7 @@ public class Main {
     }
 
 // Combine all async results
-    trackUris.addAll(futures.stream()
-        .map(CompletableFuture::join)
-        .flatMap(List::stream)
-        .toList());
+    trackUris.addAll(futures.stream().map(CompletableFuture::join).flatMap(List::stream).toList());
     return trackUris;
   }
 
@@ -357,17 +351,20 @@ public class Main {
 
     executeWithRetry(spotifyApi.replacePlaylistsItems(SHUFFLE_ID, new JsonArray()).build());
 
-    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUrisCopy.size());
-
     addTracksInChunks(shufflePlaylistTrackUrisCopy);
 
 
   }
 
   private static void updatePlaylistImage() throws Exception {
-    Path file = Paths.get(
-        Objects.requireNonNull(Main.class.getClassLoader().getResource("playlist_compressed.jpg")).toURI());
-    byte[] fileBytes = Files.readAllBytes(file);
+    InputStream resourceAsStream = Main.class.getClassLoader()
+        .getResourceAsStream("playlist_compressed.jpg");
+    if (resourceAsStream == null) {
+      throw new IllegalArgumentException("Resource not found: playlist_compressed.jpg");
+    }
+
+    byte[] fileBytes = resourceAsStream.readAllBytes();
+    resourceAsStream.close();
 
     String base64String = Base64.getEncoder().encodeToString(fileBytes);
 
@@ -487,7 +484,7 @@ public class Main {
         return request.execute();
       } catch (TooManyRequestsException e) {
         int retryAfter = e.getRetryAfter();
-        LOG.warn("Rate limited. Retrying after {} seconds...", retryAfter);
+        LOG.debug("Rate limited. Retrying after {} seconds...", retryAfter);
         Thread.sleep(retryAfter * 1000L);
       }
       attempt++;
