@@ -39,10 +39,12 @@ import se.michaelthelin.spotify.model_objects.specification.Paging;
 import se.michaelthelin.spotify.model_objects.specification.PagingCursorbased;
 import se.michaelthelin.spotify.model_objects.specification.PlaylistSimplified;
 import se.michaelthelin.spotify.model_objects.specification.PlaylistTrack;
+import se.michaelthelin.spotify.model_objects.specification.SavedAlbum;
 import se.michaelthelin.spotify.model_objects.specification.SavedTrack;
 import se.michaelthelin.spotify.model_objects.specification.Track;
 import se.michaelthelin.spotify.model_objects.specification.TrackSimplified;
 import se.michaelthelin.spotify.requests.IRequest;
+import se.michaelthelin.spotify.requests.data.follow.GetUsersFollowedArtistsRequest;
 
 public class Main {
 
@@ -64,6 +66,8 @@ public class Main {
       "user-library-read", "playlist-modify-private", "ugc-image-upload",
       "playlist-read-collaborative", "user-follow-read");
 
+  private static final int PAGING_LIMIT = 50;
+
   public static void main(String[] args) throws Exception {
     spotifyApi = new SpotifyApi.Builder().setClientId(dotenv.get("SPOTIFY_CLIENT"))
         .setClientSecret(dotenv.get("SPOTIFY_SECRET")).setRedirectUri(redirectUri).build();
@@ -83,6 +87,7 @@ public class Main {
 
     addPlaylistsToShuffleList();
     addFollowedArtistsToShuffleList();
+    addUserAlbums();
     shuffleThePlaylist();
     updatePlaylistImage();
 
@@ -239,13 +244,12 @@ public class Main {
     List<String> likedSongsUris = new ArrayList<>();
 
     // Fetch liked tracks in a paginated manner
-    int limit = 50; // Maximum allowed limit per request
     int offset = 0; // Start at the beginning
     boolean moreTracksAvailable = true;
 
     while (moreTracksAvailable) {
       Paging<SavedTrack> savedTracks = executeWithRetry(spotifyApi.getUsersSavedTracks()
-          .limit(limit)   // Number of tracks to retrieve per request (max 50)
+          .limit(PAGING_LIMIT)
           .offset(offset) // Start offset for fetching tracks
           .build());
 
@@ -255,7 +259,7 @@ public class Main {
       }
 
       // Check if there are more tracks to fetch
-      offset += limit;
+      offset += PAGING_LIMIT;
       if (savedTracks.getNext() == null) {
         moreTracksAvailable = false;
       }
@@ -375,32 +379,45 @@ public class Main {
 
   private static List<Artist> listArtists() throws Exception {
     List<Artist> artistData = JsonFileDb.loadArtists();
-    PagingCursorbased<se.michaelthelin.spotify.model_objects.specification.Artist> artistPaging = executeWithRetry(
-        spotifyApi.getUsersFollowedArtists(ModelObjectType.ARTIST).build());
+    PagingCursorbased<se.michaelthelin.spotify.model_objects.specification.Artist> artistPaging;
+    String after = null;
 
     Scanner scanner = new Scanner(System.in);
 
-    for (se.michaelthelin.spotify.model_objects.specification.Artist followedArtist : artistPaging.getItems()) {
-      Artist artist = new Artist();
-      artist.setName(followedArtist.getName());
-      artist.setId(followedArtist.getId());
+    do {
+      GetUsersFollowedArtistsRequest.Builder request = spotifyApi.getUsersFollowedArtists(ModelObjectType.ARTIST);
+      if (after != null) {
+        request.after(after);
+      }
+      artistPaging = executeWithRetry(
+          request.limit(PAGING_LIMIT)
+              .build()
+      );
 
-      if (artistData.contains(artist) || artist.getId().equals(SHUFFLE_ID)) {
-        continue;
+      for (se.michaelthelin.spotify.model_objects.specification.Artist followedArtist : artistPaging.getItems()) {
+        Artist artist = new Artist();
+        artist.setName(followedArtist.getName());
+        artist.setId(followedArtist.getId());
+
+        if (artistData.contains(artist) || artist.getId().equals(SHUFFLE_ID)) {
+          continue;
+        }
+
+        // Prompt the user for "keep" input
+        LOG.info("Artist: {}", artist.getName());
+        // Prompt the user for "add to shuffle" input
+        LOG.info("Add this artist to shuffle? (y/n): ");
+        String shuffleResponse = scanner.nextLine().trim().toLowerCase();
+        artist.setIncludeInShuffle(shuffleResponse.equals("y"));
+
+        // Add to artist data
+        artistData.add(artist);
+
+        LOG.info("-----------------------------"); // Just for readability
       }
 
-      // Prompt the user for "keep" input
-      LOG.info("Artist: {}", artist.getName());
-      // Prompt the user for "add to shuffle" input
-      LOG.info("Add this artist to shuffle? (y/n): ");
-      String shuffleResponse = scanner.nextLine().trim().toLowerCase();
-      artist.setIncludeInShuffle(shuffleResponse.equals("y"));
-
-      // Add to artist data
-      artistData.add(artist);
-
-      LOG.info("-----------------------------"); // Just for readability
-    }
+      after = artistPaging.getNext();
+    } while (artistPaging.getItems().length > 0 && after != null);
 
     // Save updated playlist data to file
     JsonFileDb.saveArtists(artistData);
@@ -410,7 +427,6 @@ public class Main {
   }
 
   private static List<String> getArtistTopTracks(String artistId) throws Exception {
-    int limit = 50; // Max per request
     List<Track> allTracks = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
 
     // **Step 1: Fetch ALL albums**
@@ -421,10 +437,10 @@ public class Main {
     do {
       albumPaging = executeWithRetry(
           spotifyApi.getArtistsAlbums(artistId).setQueryParameter("include_groups", "album,single")
-              .limit(limit).offset(offset).build());
+              .limit(PAGING_LIMIT).offset(offset).build());
 
       albums.addAll(Arrays.asList(albumPaging.getItems()));
-      offset += limit;
+      offset += PAGING_LIMIT;
     } while (albumPaging.getNext() != null);
 
     // **Step 2: Collect ALL track IDs from albums**
@@ -434,12 +450,9 @@ public class Main {
     for (AlbumSimplified album : albums) {
       albumFutures.add(CompletableFuture.runAsync(() -> {
         try {
-          Paging<TrackSimplified> trackPaging = executeWithRetry(
-              spotifyApi.getAlbumsTracks(album.getId()).limit(limit).build());
+          List<String> albumTrackIds = getTracksFromAlbum(album.getId());
           synchronized (trackIds) {
-            for (TrackSimplified track : trackPaging.getItems()) {
-              trackIds.add(track.getId());
-            }
+            trackIds.addAll(albumTrackIds);
           }
         } catch (Exception e) {
           LOG.error("Error fetching tracks from album {}: {}", album.getName(), e.getMessage());
@@ -449,11 +462,10 @@ public class Main {
 
     CompletableFuture.allOf(albumFutures.toArray(new CompletableFuture[0])).join();
 
-    // **Step 3: Fetch track details in parallel (in batches of 50)**
     List<CompletableFuture<Void>> trackFutures = new ArrayList<>();
 
-    for (int i = 0; i < trackIds.size(); i += limit) {
-      int end = Math.min(i + limit, trackIds.size());
+    for (int i = 0; i < trackIds.size(); i += PAGING_LIMIT) {
+      int end = Math.min(i + PAGING_LIMIT, trackIds.size());
       String[] batchIds = trackIds.subList(i, end).toArray(new String[0]);
 
       trackFutures.add(CompletableFuture.runAsync(() -> {
@@ -473,6 +485,31 @@ public class Main {
     // **Step 4: Sort by popularity and return top 25**
     return allTracks.stream().sorted(Comparator.comparingInt(Track::getPopularity).reversed())
         .limit(25).map(Track::getUri).toList();
+  }
+
+  private static List<String> getTracksFromAlbum(String albumId) throws Exception {
+    Paging<TrackSimplified> trackPaging = executeWithRetry(
+        spotifyApi.getAlbumsTracks(albumId).limit(PAGING_LIMIT).build());
+
+    return Arrays.stream(trackPaging.getItems()).map(TrackSimplified::getId).toList();
+  }
+  
+  private static void addUserAlbums() throws  Exception {
+    int offset = 0;
+    Paging<SavedAlbum> savedAlbums;
+    do {
+      savedAlbums = executeWithRetry(
+          spotifyApi.getCurrentUsersSavedAlbums().limit(PAGING_LIMIT).offset(offset).build());
+
+      for (SavedAlbum savedAlbum : savedAlbums.getItems()) {
+        List<String> tracks = getTracksFromAlbum(savedAlbum.getAlbum().getId());
+        shufflePlaylistTrackUris.addAll(tracks.stream().map(uri -> "spotify:track:" + uri).toList());
+        LOG.info("Added {} tracks from album: {} - {}", tracks.size(), savedAlbum.getAlbum().getName(),
+            savedAlbum.getAlbum().getArtists()[0].getName());
+      }
+
+      offset += PAGING_LIMIT;
+    } while (savedAlbums.getNext() != null);
   }
 
   private static <T> T executeWithRetry(IRequest<T> request) throws Exception {
