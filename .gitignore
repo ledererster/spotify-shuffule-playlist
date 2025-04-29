@@ -7,6 +7,7 @@ build/
 .env
 spotify_tokens
 data.json
+shuffle_playlist.txt
 
 ### IntelliJ IDEA ###
 .idea/

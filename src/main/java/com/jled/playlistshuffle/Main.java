@@ -68,6 +68,8 @@ public class Main {
 
   private static final int PAGING_LIMIT = 50;
 
+  private static final String PLAYLIST_FILE = "shuffle_playlist.txt";
+
   public static void main(String[] args) throws Exception {
     spotifyApi = new SpotifyApi.Builder().setClientId(dotenv.get("SPOTIFY_CLIENT"))
         .setClientSecret(dotenv.get("SPOTIFY_SECRET")).setRedirectUri(redirectUri).build();
@@ -81,22 +83,29 @@ public class Main {
       refreshAccessToken();
     }
 
-    LOG.info("Loading initial playlist state");
-    shufflePlaylistTrackUris.addAll(getPlaylistTrackUris(SHUFFLE_ID));
-    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
+    if (args.length > 0 && args[0].equals("--read-from-disk")) {
+      LOG.info("Reading playlist from disk and adding tracks in chunks...");
+      List<String> tracksFromFile = readListFromFile(PLAYLIST_FILE);
+      addTracksInChunks(tracksFromFile);
+    } else {
 
-    addPlaylistsToShuffleList();
-    addFollowedArtistsToShuffleList();
-    addUserAlbums();
-    shuffleThePlaylist();
-    updatePlaylistImage();
+      LOG.info("Loading initial playlist state");
+      shufflePlaylistTrackUris.addAll(getPlaylistTrackUris(SHUFFLE_ID));
+      LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
 
-    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
-    LOG.info("getting playlist again to verify count..");
-    shufflePlaylistTrackUris.clear();
-    shufflePlaylistTrackUris.addAll(getPlaylistTrackUris(SHUFFLE_ID));
-    LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
+      addPlaylistsToShuffleList();
+      addFollowedArtistsToShuffleList();
+      addUserAlbums();
+      shuffleThePlaylist();
+      updatePlaylistImage();
 
+      LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
+      LOG.info("getting playlist again to verify count..");
+      shufflePlaylistTrackUris.clear();
+      shufflePlaylistTrackUris.addAll(getPlaylistTrackUris(SHUFFLE_ID));
+      LOG.info("Shuffle songs : {}", shufflePlaylistTrackUris.size());
+
+    }
   }
 
   private static void performOAuthFlow() throws Exception {
@@ -352,12 +361,29 @@ public class Main {
 
     List<String> shufflePlaylistTrackUrisCopy = new ArrayList<>(shufflePlaylistTrackUris);
     Collections.shuffle(shufflePlaylistTrackUrisCopy);
-
+    saveListToFile(shufflePlaylistTrackUrisCopy, PLAYLIST_FILE);
     executeWithRetry(spotifyApi.replacePlaylistsItems(SHUFFLE_ID, new JsonArray()).build());
 
     addTracksInChunks(shufflePlaylistTrackUrisCopy);
 
 
+  }
+
+  private static List<String> readListFromFile(String filename) throws IOException {
+      Path filePath = Paths.get(filename);
+      if (!Files.exists(filePath)) {
+        return Collections.emptyList();
+      }
+      return Files.readAllLines(filePath);
+    }
+
+  private static void saveListToFile(List<String> list, String filename) throws IOException {
+    try (BufferedWriter writer = new BufferedWriter(new FileWriter(filename))) {
+      for (String item : list) {
+        writer.write(item);
+        writer.newLine();
+      }
+    }
   }
 
   private static void updatePlaylistImage() throws Exception {
